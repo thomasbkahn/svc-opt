@@ -1,6 +1,8 @@
 # svc-opt
 Tools for scanning for optimal support vector machine classifier parameters
 
+Discussed and demonstrated [here](http://thomasbkahn.github.io/svc-opt/).
+
 ## Dependencies
 - scikit-learn
 - bokeh
