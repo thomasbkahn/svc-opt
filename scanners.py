@@ -4,18 +4,21 @@ import numpy as np
 from sklearn.svm import SVC
 from sklearn.cross_validation import train_test_split
 from sklearn.metrics import precision_recall_fscore_support
+from sklearn.utils import ConvergenceWarning
 from tqdm import tqdm
 from bokeh.plotting import figure, show, save, output_notebook, output_file, ColumnDataSource, gridplot
-from bokeh.models import HoverTool
+from bokeh.models import HoverTool, PrintfTickFormatter
 import matplotlib.pyplot as plt
 from utilities import cm_to_bokeh, get_color_index
 
+# supress harmless sklearn warnings
 warnings.filterwarnings("ignore", message="Precision and F-score are ill-defined and being set to 0.0 in labels with no predicted samples.")
+warnings.simplefilter("ignore", ConvergenceWarning)
 
 class BaseScanner(object):
 
 
-    def __init__(self, X, y, class_names, n_steps, n_iters):
+    def __init__(self, X, y, class_names, n_steps, n_iters, seed):
        
         self.X = X
         self.y = y
@@ -29,17 +32,26 @@ class BaseScanner(object):
         self.titles = ['Overall Accuracy', 'Training Accuracy', 'Difference']
         self.titles.extend('{name} (F1 Score)'.format(name=name) for name in self.class_names)
         self.tol = 1e-3
+        self.max_solver_iters = 500
         self.plot_params = dict()
         self.restore_plot_defaults()
-
+        self._get_seeds(seed)
 
     def restore_plot_defaults(self):
         
         self.plot_params.update({
-            'cmap' : cm_to_bokeh(plt.cm.magma),
             'highlight_max' : 'cornflowerblue',
             'highlight_hovertext' : 'firebrick',
         })
+
+        self.set_cmap(plt.cm.magma)
+
+    def set_cmap(self, cm):
+        self.plot_params['cmap'] = cm_to_bokeh(cm)
+
+    def _get_seeds(self, seed):
+        randgen = np.random.RandomState(seed)
+        self.seeds = randgen.randint(0, int(1e6), int(1e3)).tolist()
 
 
 
@@ -47,10 +59,10 @@ class BaseScanner(object):
 class RBFScanner(BaseScanner):
 
 
-    def __init__(self, X, y, C_lims=(-4,4), gamma_lims=(-4,4), n_steps=50, n_iters=20, logvals=True, class_names=None):
+    def __init__(self, X, y, C_lims=(-12,12), gamma_lims=(-12,12), n_steps=50, n_iters=20, logvals=True, class_names=None, seed=None):
 
-        BaseScanner.__init__(self, X, y, class_names, n_steps, n_iters)
-        self.clf = SVC(kernel='rbf', decision_function_shape='ovr')
+        BaseScanner.__init__(self, X, y, class_names, n_steps, n_iters, seed)
+        self.clf = SVC(kernel='rbf', decision_function_shape='ovr', max_iter=self.max_solver_iters)
         self.scan(logvals, C_lims, gamma_lims)
 
 
@@ -87,6 +99,10 @@ class RBFScanner(BaseScanner):
         })
 
         self.accs = np.zeros((self.n_steps, self.n_steps, self.n_classes+3))
+
+        scan_seed = self.seeds.pop()
+        randgen = np.random.RandomState(seed=scan_seed)
+        split_seeds = randgen.randint(0, int(1e6), int(self.n_iters * (self.n_steps ** 2))).tolist()
     
         for j, C_val_j in tqdm(enumerate(self.C_vals), total=self.n_steps, desc='Scanning progress'):
             for i, gamma_val_i in enumerate(self.gamma_vals):
@@ -95,8 +111,9 @@ class RBFScanner(BaseScanner):
                 f1_arr      = np.zeros((self.n_iters, self.n_classes), dtype=np.float64)
                 support_arr = np.zeros((self.n_iters, self.n_classes), dtype=np.int8)
                 for n in range(self.n_iters):
+                    split_seed = split_seeds.pop()
                     self.clf.set_params(C=C_val_j, gamma=gamma_val_i)
-                    X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.33)
+                    X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.33, random_state=split_seed)
                     self.clf.fit(X_train, y_train)
                     y_pred = self.clf.predict(X_test)
                     matches = y_pred == y_test
@@ -119,7 +136,7 @@ class RBFScanner(BaseScanner):
         self._find_optimals()
 
 
-    def show_train_test(self, n_cols=3, dims=(400,400), v_lims=(0.0, 1.0), save_string=None):
+    def show_train_test(self, n_cols=3, dims=(300,300), v_lims=(0.0, 1.0), save_string=None):
         
         plot_titles = [
             'Overall Accuracy',
@@ -156,11 +173,11 @@ class RBFScanner(BaseScanner):
         return fig
 
 
-    def show_single(self, title, n_cols=1, dims=(400,400), v_lims=(0.0, 1.0), save_string=None):
+    def show_single(self, title, dims=(500,500), v_lims=(0.0, 1.0), save_string=None):
 
         self.plot_params.update({
             'plot_titles' : [title],
-            'n_cols'      : n_cols,
+            'n_cols'      : 1,
             'dims'        : dims,
             'v_lims'      : v_lims,
             'save_string' : save_string
@@ -183,9 +200,6 @@ class RBFScanner(BaseScanner):
             fig_i.y_range = figs[0].y_range
 
         for i, fig in enumerate(figs):
-            fig.title_text_font = 'futura'
-            fig.axis.axis_label_text_font = 'futura'
-            fig.axis.major_label_text_font = 'futura'
             fig.title_text_color = 'black'
             fig.axis.axis_label_text_color = 'black'
             fig.axis.major_label_text_color = '#B3B3B3'
@@ -193,7 +207,7 @@ class RBFScanner(BaseScanner):
             fig.axis.axis_label_text_font_size = '12pt'
             fig.axis.major_label_text_font_size= '9pt'
             fig.axis.minor_tick_line_color = None
-            fig.axis.major_tick_in = 0
+            fig.axis.major_tick_in = -2
             fig.axis.major_tick_out = 8
             fig.axis.major_tick_line_color = '#B3B3B3'
             fig.axis.major_tick_line_width = 2
@@ -202,6 +216,9 @@ class RBFScanner(BaseScanner):
             fig.yaxis.axis_label = self.plot_params['y_label']
             fig.outline_line_width = 0.5
             fig.outline_line_color = 'black'
+            if not self.logvals:
+                fig.xaxis[0].formatter = PrintfTickFormatter(format="%0.1e")
+                fig.yaxis[0].formatter = PrintfTickFormatter(format="%0.1e")
             hover = fig.select_one(HoverTool)
             hover.point_policy = "follow_mouse"
             hover.tooltips = self._hovertool_html[i]
@@ -300,7 +317,7 @@ class RBFScanner(BaseScanner):
     def _make_hovertool_string(self):
 
         head = """
-        <div style="font: 12px futura, sans-serif;color: #000000">
+        <div style="font-size: 12px; line-height: 125%;color: #000000">
         <span>Gamma = @x_tag</span>&nbsp;
         <br>
         <span>C = @y_tag</span>&nbsp;
